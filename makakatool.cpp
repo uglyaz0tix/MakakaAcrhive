@@ -6,6 +6,7 @@
 #include <lzma.h>
 #include <zstd.h>
 #include <cstring>
+#include <stdexcept>
 
 namespace fs = std::filesystem;
 
@@ -27,14 +28,64 @@ std::vector<uint8_t> compressWithLZMA(const std::vector<uint8_t>& input) {
     stream.next_in = input.data();
     stream.avail_in = input.size();
 
-    std::vector<uint8_t> output(input.size() * 1.5);
+    std::vector<uint8_t> output(input.size() * 1.5 + 1024);
     stream.next_out = output.data();
     stream.avail_out = output.size();
 
-    lzma_code(&stream, LZMA_FINISH);
+    while (true) {
+        lzma_ret ret = lzma_code(&stream, LZMA_FINISH);
+        if (ret == LZMA_STREAM_END) {
+            break;
+        }
+        if (ret != LZMA_OK) {
+            lzma_end(&stream);
+            throw std::runtime_error("LZMA compression failed");
+        }
+        if (stream.avail_out == 0) {
+            size_t old_size = output.size();
+            output.resize(old_size * 1.5);
+            stream.next_out = output.data() + old_size;
+            stream.avail_out = output.size() - old_size;
+        }
+    }
+
     output.resize(stream.total_out);
     lzma_end(&stream);
+    return output;
+}
 
+std::vector<uint8_t> decompressLZMA(const std::vector<uint8_t>& input, size_t original_size) {
+    lzma_stream stream = LZMA_STREAM_INIT;
+    if (lzma_auto_decoder(&stream, UINT64_MAX, 0) != LZMA_OK) {
+        throw std::runtime_error("LZMA decompression initialization failed");
+    }
+
+    stream.next_in = input.data();
+    stream.avail_in = input.size();
+
+    std::vector<uint8_t> output(original_size > 0 ? original_size : input.size() * 4);
+    stream.next_out = output.data();
+    stream.avail_out = output.size();
+
+    while (true) {
+        lzma_ret ret = lzma_code(&stream, LZMA_FINISH);
+        if (ret == LZMA_STREAM_END) {
+            break;
+        }
+        if (ret != LZMA_OK && ret != LZMA_BUF_ERROR) {
+            lzma_end(&stream);
+            throw std::runtime_error("LZMA decompression failed");
+        }
+        if (stream.avail_out == 0) {
+            size_t old_size = output.size();
+            output.resize(old_size * 1.5);
+            stream.next_out = output.data() + old_size;
+            stream.avail_out = output.size() - old_size;
+        }
+    }
+
+    output.resize(stream.total_out);
+    lzma_end(&stream);
     return output;
 }
 
@@ -166,7 +217,9 @@ void extractArchive(const std::string& archive_path, const std::string& output_d
         in.read(reinterpret_cast<char*>(compressed_data.data()), compressed_size);
 
         std::vector<uint8_t> file_data;
-        if (compression == COMPRESS_ZSTD) {
+        if (compression == COMPRESS_LZMA) {
+            file_data = decompressLZMA(compressed_data, original_size);
+        } else if (compression == COMPRESS_ZSTD) {
             file_data = decompressZSTD(compressed_data, original_size);
         } else {
             file_data = compressed_data;
